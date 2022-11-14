@@ -1,7 +1,10 @@
-import { NearBindgen, near, call, view, LookupMap, UnorderedMap, initialize } from 'near-sdk-js';
+import { NearBindgen, near, call, view, LookupMap, UnorderedMap, initialize, assert } from 'near-sdk-js';
 import { internalNftToken, internalNftTokens, internalNftTokensForOwner, internalSupplyForOwner, internalTotalSupply } from './enummeration';
+import { internalAddSale, internalBuyNft, internalGetSale, internalGetSales, internalRemoveSale } from './marketplace';
 import { JsonToken, NFTContractMetadata, TokenMetadata } from './metadata';
 import { internalMintNFT } from './mint';
+import { assertOneYocto, internalNftTransfer } from './nft_core';
+import { JsonSale } from './sale';
 
 /// This spec can be treated like a version of the standard.
 export const NFT_METADATA_SPEC = "nft-1.0.0";
@@ -21,6 +24,12 @@ export class Contract {
             name: "BKHCM Tutorial Contract",
             symbol: "BKHCM-NFT"
         });
+
+    // Marketplace
+    nextSaleId: 0;
+    sales: UnorderedMap = new UnorderedMap("sales"); // {saleId, Sale};
+    salesByOwnerId: LookupMap = new LookupMap("salesByOwnerId"); // {accountId, Set<saleId>}
+
 
     @initialize({privateFunction: true})
     init({owner_id}: {owner_id: string}) {
@@ -42,7 +51,8 @@ export class Contract {
         approval_id: number | null,
         memo: string | null
     }) {
-
+        assertOneYocto();
+        internalNftTransfer({contract: this, receiverId: receiver_id, tokenId: token_id, memo});
     }
 
     @call({payableFunction: true})
@@ -92,5 +102,39 @@ export class Contract {
     @view({})
     nft_metadata(): NFTContractMetadata {
         return this.metadata;
+    }
+
+    // marketplace
+    @call({payableFunction: true})
+    add_sale({ token_id, price }: { token_id: string, price: string }) {
+        assertOneYocto();
+        // TODO: handle add sale
+        internalAddSale({contract: this, token_id, price});
+    }
+
+    @call({payableFunction: true})
+    remove_sale({sale_id}: {sale_id: string}) {
+        assertOneYocto();
+        internalRemoveSale({contract: this, sale_id});
+    }
+
+    @call({payableFunction: true})
+    update_price({sale_id, price}: { sale_id: string, price: string}) {
+        assertOneYocto();
+    }
+
+    @call({payableFunction: true})
+    buy({sale_id}: {sale_id: string}) {
+        internalBuyNft({contract: this, sale_id});
+    }
+
+    @view({})
+    get_sales(): JsonSale[] {
+        return internalGetSales({contract: this});
+    }
+
+    @view({})
+    get_sale({sale_id}: {sale_id: string}): JsonSale {
+        return internalGetSale({contract: this, sale_id});
     }
 }

@@ -388,6 +388,10 @@ function predecessorAccountId() {
 function attachedDeposit() {
   return env.attached_deposit();
 }
+// NOTE: "env.panic(msg)" is not exported, use "throw Error(msg)" instead
+function panicUtf8(msg) {
+  env.panic_utf8(msg);
+}
 function storageRead(key) {
   let ret = env.storage_read(key, 0);
   if (ret === 1n) {
@@ -905,6 +909,22 @@ function internalAddTokenToOwner({
   // Insert to owner
   contract.tokensPerOwner.set(accountId, tokenSet);
 }
+function internalRemoveTokenFromOwner({
+  contract,
+  accountId,
+  tokenId
+}) {
+  let tokenSet = restoreOwners(contract.tokensPerOwner.get(accountId));
+  if (tokenSet == null) {
+    panicUtf8("Token should be owned by the sender");
+  }
+  tokenSet.remove(tokenId);
+  if (tokenSet.isEmpty()) {
+    contract.tokensPerOwner.remove(accountId);
+  } else {
+    contract.tokensPerOwner.set(accountId, tokenSet);
+  }
+}
 
 class NFTContractMetadata {
   constructor({
@@ -1056,6 +1076,59 @@ function internalMintNFT({
   log(`EVENT_JSON:${JSON.stringify(nftMintLog)}`);
 }
 
+/**
+ * 1. Validate data
+ * 2. Xoá owner hiện tại NFT
+ * 3. Thêm owner mới cho NFT
+ */
+function internalNftTransfer({
+  contract,
+  receiverId,
+  tokenId,
+  memo
+}) {
+  let token = contract.tokensById.get(tokenId);
+  let senderId = predecessorAccountId();
+  if (token == null) {
+    panicUtf8("Not found token");
+  }
+  assert(senderId == token.owner_id, "Unauthorized");
+  assert(receiverId != token.owner_id, "The token owner and the receiver should be different");
+  internalRemoveTokenFromOwner({
+    contract,
+    accountId: token.owner_id,
+    tokenId
+  });
+  internalAddTokenToOwner({
+    contract,
+    accountId: receiverId,
+    tokenId
+  });
+  let newToken = new Token({
+    ownerId: receiverId
+  });
+  contract.tokensById.set(tokenId, newToken);
+  if (memo != null) {
+    log(`Memo: ${memo}`);
+  }
+  let nftTransferLog = {
+    standard: NFT_STANDARD_NAME,
+    version: NFT_METADATA_SPEC,
+    event: "nft_transfer",
+    data: [{
+      authorized_id: senderId,
+      old_owner_id: token.owner_id,
+      new_owner_id: receiverId,
+      token_ids: [tokenId],
+      memo
+    }]
+  };
+
+  // Log the serialized json
+  log(`EVENT_JSON:${JSON.stringify(nftTransferLog)}`);
+  return token;
+}
+
 var _dec, _dec2, _dec3, _dec4, _dec5, _dec6, _dec7, _dec8, _dec9, _dec10, _dec11, _dec12, _class, _class2;
 
 /// This spec can be treated like a version of the standard.
@@ -1108,7 +1181,14 @@ let Contract = (_dec = NearBindgen({}), _dec2 = initialize({
     token_id,
     approval_id,
     memo
-  }) {}
+  }) {
+    internalNftTransfer({
+      contract: this,
+      receiverId: receiver_id,
+      tokenId: token_id,
+      memo
+    });
+  }
   nft_transfer_call({
     receiver_id,
     token_id,
