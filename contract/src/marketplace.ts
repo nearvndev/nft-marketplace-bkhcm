@@ -28,9 +28,10 @@ export function internalAddSale({
     });
 
     contract.nextSaleId++;
-    contract.sales.set(contract.nextSaleId.toString(), sale);
+    let saleId = contract.nextSaleId.toString();
+    contract.sales.set(saleId, sale);
     
-    internalAddSaleByOwner({contract, accountId: senderId, saleId: contract.nextSaleId.toString()});
+    internalAddSaleByOwner({contract, accountId: senderId, saleId});
 }
 
 export function internalAddSaleByOwner({
@@ -47,7 +48,7 @@ export function internalAddSaleByOwner({
         saleSet = new UnorderedSet("saleByOwner-" + accountId);
     }
     saleSet.set(saleId);
-    contract.salesByOwnerId.set(saleId, saleSet);
+    contract.salesByOwnerId.set(accountId, saleSet);
 }
 
 export function internalRemoveSale({contract, sale_id}: {contract: Contract, sale_id: string}) {

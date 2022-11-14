@@ -26,7 +26,7 @@ export class Contract {
         });
 
     // Marketplace
-    nextSaleId: 0;
+    nextSaleId: number = 0;
     sales: UnorderedMap = new UnorderedMap("sales"); // {saleId, Sale};
     salesByOwnerId: LookupMap = new LookupMap("salesByOwnerId"); // {accountId, Set<saleId>}
 

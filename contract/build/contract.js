@@ -419,6 +419,12 @@ function input() {
   env.input(0);
   return env.read_register(0);
 }
+function promiseBatchCreate(accountId) {
+  return env.promise_batch_create(accountId);
+}
+function promiseBatchActionTransfer(promiseIndex, amount) {
+  env.promise_batch_action_transfer(promiseIndex, amount);
+}
 function storageWrite(key, value) {
   let exist = env.storage_write(key, value, EVICTED_REGISTER);
   if (exist === 1n) {
@@ -1039,41 +1045,34 @@ function internalNftTokensForOwner({
   return tokens;
 }
 
-function internalMintNFT({
-  contract,
-  tokenId,
-  metadata,
-  receiverId
-}) {
-  let token = new Token({
-    ownerId: receiverId
-  });
-  assert(!contract.tokensById.containsKey(tokenId), "Token already exists");
+class Sale {
+  constructor({
+    owner_id,
+    token_id,
+    price
+  }) {
+    this.owner_id = owner_id;
+    this.token_id = token_id;
+    this.price = price;
+  }
+}
+class JsonSale {
+  constructor({
+    sale_id,
+    owner_id,
+    price,
+    token
+  }) {
+    this.sale_id = sale_id;
+    this.owner_id = owner_id;
+    this.price = price;
+    this.token = token;
+  }
+}
 
-  // Insert token
-  contract.tokensById.set(tokenId, token);
-
-  // Add token owner
-  internalAddTokenToOwner({
-    contract,
-    accountId: receiverId,
-    tokenId
-  });
-
-  // insert token id and metadata
-  contract.tokenMetadataById.set(tokenId, metadata);
-
-  // NFT Mint events
-  let nftMintLog = {
-    standard: NFT_STANDARD_NAME,
-    version: NFT_METADATA_SPEC,
-    event: "nft_mint",
-    data: [{
-      owner_id: token.owner_id,
-      token_ids: [tokenId]
-    }]
-  };
-  log(`EVENT_JSON:${JSON.stringify(nftMintLog)}`);
+function assertOneYocto() {
+  // 1 NEAR = 10^24 yoctoNEAR
+  assert(attachedDeposit().toString() === "1", "Requires attached deposit of exactly 1 yoctoNEAR");
 }
 
 /**
@@ -1128,9 +1127,225 @@ function internalNftTransfer({
   log(`EVENT_JSON:${JSON.stringify(nftTransferLog)}`);
   return token;
 }
+function internalOfferNftTransfer({
+  contract,
+  receiverId,
+  senderId,
+  tokenId,
+  memo
+}) {
+  let token = contract.tokensById.get(tokenId);
+  if (token == null) {
+    panicUtf8("Not found token");
+  }
+  assert(senderId == token.owner_id, "Unauthorized");
+  assert(receiverId != token.owner_id, "The token owner and the receiver should be different");
+  internalRemoveTokenFromOwner({
+    contract,
+    accountId: token.owner_id,
+    tokenId
+  });
+  internalAddTokenToOwner({
+    contract,
+    accountId: receiverId,
+    tokenId
+  });
+  let newToken = new Token({
+    ownerId: receiverId
+  });
+  contract.tokensById.set(tokenId, newToken);
+  if (memo != null) {
+    log(`Memo: ${memo}`);
+  }
+  let nftTransferLog = {
+    standard: NFT_STANDARD_NAME,
+    version: NFT_METADATA_SPEC,
+    event: "nft_transfer",
+    data: [{
+      authorized_id: senderId,
+      old_owner_id: token.owner_id,
+      new_owner_id: receiverId,
+      token_ids: [tokenId],
+      memo
+    }]
+  };
 
-var _dec, _dec2, _dec3, _dec4, _dec5, _dec6, _dec7, _dec8, _dec9, _dec10, _dec11, _dec12, _class, _class2;
+  // Log the serialized json
+  log(`EVENT_JSON:${JSON.stringify(nftTransferLog)}`);
+  return token;
+}
 
+function internalAddSale({
+  contract,
+  token_id,
+  price
+}) {
+  let senderId = predecessorAccountId();
+  let token = contract.tokensById.get(token_id);
+  if (token == null) {
+    panicUtf8("Not found token");
+  }
+  assert(senderId == token.owner_id, "Unauthorized");
+  let sale = new Sale({
+    owner_id: senderId,
+    token_id,
+    price
+  });
+  contract.nextSaleId++;
+  let saleId = contract.nextSaleId.toString();
+  contract.sales.set(saleId, sale);
+  internalAddSaleByOwner({
+    contract,
+    accountId: senderId,
+    saleId
+  });
+}
+function internalAddSaleByOwner({
+  contract,
+  accountId,
+  saleId
+}) {
+  let saleSet = restoreOwners(contract.salesByOwnerId.get(accountId));
+  if (saleSet == null) {
+    saleSet = new UnorderedSet("saleByOwner-" + accountId);
+  }
+  saleSet.set(saleId);
+  contract.salesByOwnerId.set(accountId, saleSet);
+}
+function internalRemoveSale({
+  contract,
+  sale_id
+}) {
+  let sale = contract.sales.remove(sale_id);
+  if (sale == null) {
+    panicUtf8("No sale");
+  }
+  let byOwnerId = restoreOwners(contract.salesByOwnerId.get(sale.owner_id));
+  if (byOwnerId == null) {
+    panicUtf8("No sale by owner");
+  }
+  byOwnerId.remove(sale_id);
+  if (byOwnerId.isEmpty()) {
+    contract.salesByOwnerId.remove(sale.owner_id);
+  } else {
+    contract.salesByOwnerId.set(sale.owner_id, byOwnerId);
+  }
+  return sale;
+}
+function internalGetSale({
+  contract,
+  sale_id
+}) {
+  let sale = contract.sales.get(sale_id);
+  let tokenMetadata = contract.tokenMetadataById.get(sale.token_id);
+  let token = new JsonToken({
+    tokenId: sale.token_id,
+    ownerId: sale.owner_id,
+    metadata: tokenMetadata
+  });
+  let jsonSale = new JsonSale({
+    sale_id,
+    owner_id: sale.owner_id,
+    price: sale.price,
+    token
+  });
+  return jsonSale;
+}
+function internalGetSales({
+  contract
+}) {
+  let sales = [];
+  let keys = contract.sales.toArray();
+  for (let i = 0; i < keys.length; i++) {
+    let jsonSale = internalGetSale({
+      contract,
+      sale_id: keys[i][0]
+    });
+    sales.push(jsonSale);
+  }
+  return sales;
+}
+
+/**
+ * 1. Validate data
+ * 2. Transfer NFT cho nguoi mua
+ * 3. Transfer token cho ng ban
+ * 4. Remove sale
+ */
+function internalBuyNft({
+  contract,
+  sale_id
+}) {
+  let sale = contract.sales.get(sale_id);
+  if (sale == null) {
+    panicUtf8("Sale not found");
+  }
+  let deposit = attachedDeposit().valueOf();
+  assert(deposit > 0, "deposit must be greater than 0");
+  let price = BigInt(sale.price);
+  assert(deposit >= price, "deposit must ne greater than or equal to price");
+  let buyerId = predecessorAccountId();
+  assert(buyerId != sale.owner_id, "you can't offer on your sale");
+
+  // 2. transfer nft to buyer
+  internalOfferNftTransfer({
+    contract,
+    receiverId: buyerId,
+    senderId: sale.owner_id,
+    tokenId: sale.token_id,
+    memo: "Buy from marketplace"
+  });
+
+  // 3. transfer NEAR to owner
+  const promise = promiseBatchCreate(sale.owner_id);
+  // Action transfer NEAR
+  promiseBatchActionTransfer(promise, price);
+
+  // 4. remove sale
+  internalRemoveSale({
+    contract,
+    sale_id
+  });
+}
+
+function internalMintNFT({
+  contract,
+  tokenId,
+  metadata,
+  receiverId
+}) {
+  let token = new Token({
+    ownerId: receiverId
+  });
+  assert(!contract.tokensById.containsKey(tokenId), "Token already exists");
+
+  // Insert token
+  contract.tokensById.set(tokenId, token);
+
+  // Add token owner
+  internalAddTokenToOwner({
+    contract,
+    accountId: receiverId,
+    tokenId
+  });
+
+  // insert token id and metadata
+  contract.tokenMetadataById.set(tokenId, metadata);
+
+  // NFT Mint events
+  let nftMintLog = {
+    standard: NFT_STANDARD_NAME,
+    version: NFT_METADATA_SPEC,
+    event: "nft_mint",
+    data: [{
+      owner_id: token.owner_id,
+      token_ids: [tokenId]
+    }]
+  };
+  log(`EVENT_JSON:${JSON.stringify(nftMintLog)}`);
+}
+
+var _dec, _dec2, _dec3, _dec4, _dec5, _dec6, _dec7, _dec8, _dec9, _dec10, _dec11, _dec12, _dec13, _dec14, _dec15, _dec16, _dec17, _dec18, _class, _class2;
 /// This spec can be treated like a version of the standard.
 const NFT_METADATA_SPEC = "nft-1.0.0";
 
@@ -1146,7 +1361,15 @@ let Contract = (_dec = NearBindgen({}), _dec2 = initialize({
   payableFunction: true
 }), _dec6 = call({
   privateFunction: true
-}), _dec7 = view({}), _dec8 = view({}), _dec9 = view({}), _dec10 = view({}), _dec11 = view({}), _dec12 = view({}), _dec(_class = (_class2 = class Contract {
+}), _dec7 = view({}), _dec8 = view({}), _dec9 = view({}), _dec10 = view({}), _dec11 = view({}), _dec12 = view({}), _dec13 = call({
+  payableFunction: true
+}), _dec14 = call({
+  payableFunction: true
+}), _dec15 = call({
+  payableFunction: true
+}), _dec16 = call({
+  payableFunction: true
+}), _dec17 = view({}), _dec18 = view({}), _dec(_class = (_class2 = class Contract {
   tokensPerOwner = new LookupMap("tokensPerOwner"); // {accountId, Set<TokenID>}
   tokensById = new LookupMap("tokensById"); // {tokenId, Token}
   tokenMetadataById = new UnorderedMap("tokenMetadataById"); // {tokenId, TokenMetadata}
@@ -1155,6 +1378,12 @@ let Contract = (_dec = NearBindgen({}), _dec2 = initialize({
     name: "BKHCM Tutorial Contract",
     symbol: "BKHCM-NFT"
   });
+
+  // Marketplace
+  nextSaleId = 0;
+  sales = new UnorderedMap("sales"); // {saleId, Sale};
+  salesByOwnerId = new LookupMap("salesByOwnerId"); // {accountId, Set<saleId>}
+
   init({
     owner_id
   }) {
@@ -1182,6 +1411,7 @@ let Contract = (_dec = NearBindgen({}), _dec2 = initialize({
     approval_id,
     memo
   }) {
+    assertOneYocto();
     internalNftTransfer({
       contract: this,
       receiverId: receiver_id,
@@ -1248,7 +1478,139 @@ let Contract = (_dec = NearBindgen({}), _dec2 = initialize({
   nft_metadata() {
     return this.metadata;
   }
-}, (_applyDecoratedDescriptor(_class2.prototype, "init", [_dec2], Object.getOwnPropertyDescriptor(_class2.prototype, "init"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_mint", [_dec3], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_mint"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_transfer", [_dec4], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_transfer"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_transfer_call", [_dec5], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_transfer_call"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_resolve_transfer", [_dec6], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_resolve_transfer"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_total_supply", [_dec7], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_total_supply"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_supply_for_owner", [_dec8], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_supply_for_owner"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_tokens", [_dec9], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_tokens"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_token", [_dec10], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_token"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_tokens_for_owner", [_dec11], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_tokens_for_owner"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_metadata", [_dec12], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_metadata"), _class2.prototype)), _class2)) || _class);
+
+  // marketplace
+  add_sale({
+    token_id,
+    price
+  }) {
+    assertOneYocto();
+    // TODO: handle add sale
+    internalAddSale({
+      contract: this,
+      token_id,
+      price
+    });
+  }
+  remove_sale({
+    sale_id
+  }) {
+    assertOneYocto();
+    internalRemoveSale({
+      contract: this,
+      sale_id
+    });
+  }
+  update_price({
+    sale_id,
+    price
+  }) {
+    assertOneYocto();
+  }
+  buy({
+    sale_id
+  }) {
+    internalBuyNft({
+      contract: this,
+      sale_id
+    });
+  }
+  get_sales() {
+    return internalGetSales({
+      contract: this
+    });
+  }
+  get_sale({
+    sale_id
+  }) {
+    return internalGetSale({
+      contract: this,
+      sale_id
+    });
+  }
+}, (_applyDecoratedDescriptor(_class2.prototype, "init", [_dec2], Object.getOwnPropertyDescriptor(_class2.prototype, "init"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_mint", [_dec3], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_mint"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_transfer", [_dec4], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_transfer"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_transfer_call", [_dec5], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_transfer_call"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_resolve_transfer", [_dec6], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_resolve_transfer"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_total_supply", [_dec7], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_total_supply"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_supply_for_owner", [_dec8], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_supply_for_owner"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_tokens", [_dec9], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_tokens"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_token", [_dec10], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_token"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_tokens_for_owner", [_dec11], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_tokens_for_owner"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "nft_metadata", [_dec12], Object.getOwnPropertyDescriptor(_class2.prototype, "nft_metadata"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "add_sale", [_dec13], Object.getOwnPropertyDescriptor(_class2.prototype, "add_sale"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "remove_sale", [_dec14], Object.getOwnPropertyDescriptor(_class2.prototype, "remove_sale"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "update_price", [_dec15], Object.getOwnPropertyDescriptor(_class2.prototype, "update_price"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "buy", [_dec16], Object.getOwnPropertyDescriptor(_class2.prototype, "buy"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "get_sales", [_dec17], Object.getOwnPropertyDescriptor(_class2.prototype, "get_sales"), _class2.prototype), _applyDecoratedDescriptor(_class2.prototype, "get_sale", [_dec18], Object.getOwnPropertyDescriptor(_class2.prototype, "get_sale"), _class2.prototype)), _class2)) || _class);
+function get_sale() {
+  let _state = Contract._getState();
+  if (!_state && Contract._requireInit()) {
+    throw new Error("Contract must be initialized");
+  }
+  let _contract = Contract._create();
+  if (_state) {
+    Contract._reconstruct(_contract, _state);
+  }
+  let _args = Contract._getArgs();
+  let _result = _contract.get_sale(_args);
+  if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
+}
+function get_sales() {
+  let _state = Contract._getState();
+  if (!_state && Contract._requireInit()) {
+    throw new Error("Contract must be initialized");
+  }
+  let _contract = Contract._create();
+  if (_state) {
+    Contract._reconstruct(_contract, _state);
+  }
+  let _args = Contract._getArgs();
+  let _result = _contract.get_sales(_args);
+  if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
+}
+function buy() {
+  let _state = Contract._getState();
+  if (!_state && Contract._requireInit()) {
+    throw new Error("Contract must be initialized");
+  }
+  let _contract = Contract._create();
+  if (_state) {
+    Contract._reconstruct(_contract, _state);
+  }
+  let _args = Contract._getArgs();
+  let _result = _contract.buy(_args);
+  Contract._saveToStorage(_contract);
+  if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
+}
+function update_price() {
+  let _state = Contract._getState();
+  if (!_state && Contract._requireInit()) {
+    throw new Error("Contract must be initialized");
+  }
+  let _contract = Contract._create();
+  if (_state) {
+    Contract._reconstruct(_contract, _state);
+  }
+  let _args = Contract._getArgs();
+  let _result = _contract.update_price(_args);
+  Contract._saveToStorage(_contract);
+  if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
+}
+function remove_sale() {
+  let _state = Contract._getState();
+  if (!_state && Contract._requireInit()) {
+    throw new Error("Contract must be initialized");
+  }
+  let _contract = Contract._create();
+  if (_state) {
+    Contract._reconstruct(_contract, _state);
+  }
+  let _args = Contract._getArgs();
+  let _result = _contract.remove_sale(_args);
+  Contract._saveToStorage(_contract);
+  if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
+}
+function add_sale() {
+  let _state = Contract._getState();
+  if (!_state && Contract._requireInit()) {
+    throw new Error("Contract must be initialized");
+  }
+  let _contract = Contract._create();
+  if (_state) {
+    Contract._reconstruct(_contract, _state);
+  }
+  let _args = Contract._getArgs();
+  let _result = _contract.add_sale(_args);
+  Contract._saveToStorage(_contract);
+  if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
+}
 function nft_metadata() {
   let _state = Contract._getState();
   if (!_state && Contract._requireInit()) {
@@ -1393,5 +1755,5 @@ function init() {
   if (_result !== undefined) if (_result && _result.constructor && _result.constructor.name === "NearPromise") _result.onReturn();else env.value_return(Contract._serialize(_result));
 }
 
-export { Contract, NFT_METADATA_SPEC, NFT_STANDARD_NAME, init, nft_metadata, nft_mint, nft_resolve_transfer, nft_supply_for_owner, nft_token, nft_tokens, nft_tokens_for_owner, nft_total_supply, nft_transfer, nft_transfer_call };
+export { Contract, NFT_METADATA_SPEC, NFT_STANDARD_NAME, add_sale, buy, get_sale, get_sales, init, nft_metadata, nft_mint, nft_resolve_transfer, nft_supply_for_owner, nft_token, nft_tokens, nft_tokens_for_owner, nft_total_supply, nft_transfer, nft_transfer_call, remove_sale, update_price };
 //# sourceMappingURL=contract.js.map

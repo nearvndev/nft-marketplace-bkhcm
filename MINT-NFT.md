@@ -32,3 +32,20 @@ near call $NFT_CONTRACT nft_mint '{"token_id": "token-1", "metadata": {"title": 
 ```
 
 and check Collectibles in NEAR Wallet =)))
+
+
+## Marketplace
+1. Add sale
+```
+near call $NFT_CONTRACT add_sale '{"token_id": "token-1", "price": "1000000000000000000000000"}' --accountId $MAIN_ACCOUNT --depositYocto 1
+```
+
+2. Get sales
+```
+near view $NFT_CONTRACT get_sales
+```
+
+3. Buy NFT
+```
+near call $NFT_CONTRACT buy '{"sale_id": "3"}' --accountId nearvietnamhub.testnet --deposit 1
+```
