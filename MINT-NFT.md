@@ -2,7 +2,7 @@
 ### Mint NFT
 **1. Create NFT contract account**
 ```
-export $NFT_CONTRACT=bkhcm-nft.vbidev.testnet
+export $NFT_CONTRACT=bkhcm.vbidev.testnet
 export $MAIN_ACCOUNT=vbidev.testnet
 
 near create-account $NFT_CONTRACT --masterAccount $MAIN_ACCOUNT --initialBalance 20
